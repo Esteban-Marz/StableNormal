@@ -102,7 +102,19 @@ class StableNormalOutput(BaseOutput):
     gaus_noise: Union[None, torch.Tensor]
 
 from einops import rearrange  
+import os as _os
+
 class DINOv2_Encoder(torch.nn.Module):
+    """DINOv2 feature encoder for StableNormal conditioning.
+
+    Loads DINOv2 ViT architecture + pretrained weights. Supports three modes:
+      1. Offline (recommended): Set DINOV2_LOCAL_REPO and DINOV2_WEIGHTS_PATH
+         env vars to load architecture from a pre-cloned repo and weights from
+         a local file (e.g. downloaded from R2). No internet access needed.
+      2. Weights-only: Set DINOV2_WEIGHTS_PATH only. Architecture is fetched
+         via torch.hub (requires internet for repo clone, NOT for weights).
+      3. Original: No env vars set. Downloads everything from Facebook CDN.
+    """
     IMAGENET_DEFAULT_MEAN = [0.485, 0.456, 0.406]
     IMAGENET_DEFAULT_STD = [0.229, 0.224, 0.225]
 
@@ -111,13 +123,32 @@ class DINOv2_Encoder(torch.nn.Module):
         model_name = 'dinov2_vitl14',
         freeze = True,
         antialias=True,
-        device="cuda",
+        device="cpu",
         size = 448,
     ):
         super(DINOv2_Encoder, self).__init__()
-        
-        self.model = torch.hub.load('facebookresearch/dinov2', model_name)
-        self.model.eval().to(device)
+
+        local_repo = _os.environ.get("DINOV2_LOCAL_REPO")
+        weights_path = _os.environ.get("DINOV2_WEIGHTS_PATH")
+
+        if local_repo and weights_path:
+            # Fully offline: architecture from pre-cloned repo, weights from file
+            self.model = torch.hub.load(
+                local_repo, model_name, source='local', pretrained=False
+            )
+            state_dict = torch.load(weights_path, map_location='cpu', weights_only=True)
+            self.model.load_state_dict(state_dict, strict=True)
+        elif weights_path:
+            # Weights from file, architecture via torch.hub (clones repo once)
+            self.model = torch.hub.load(
+                'facebookresearch/dinov2', model_name, pretrained=False
+            )
+            state_dict = torch.load(weights_path, map_location='cpu', weights_only=True)
+            self.model.load_state_dict(state_dict, strict=True)
+        else:
+            # Original behavior: download everything from internet
+            self.model = torch.hub.load('facebookresearch/dinov2', model_name)
+
         self.device = device
         self.antialias = antialias
         self.dtype = torch.float32
@@ -170,15 +201,16 @@ class DINOv2_Encoder(torch.nn.Module):
         return x
     
     def to(self, device, dtype=None):
+        self.device = device
         if dtype is not None:
             self.dtype = dtype
             self.model.to(device, dtype)
-            self.mean.to(device, dtype)
-            self.std.to(device, dtype)
+            self.mean = self.mean.to(device, dtype)
+            self.std = self.std.to(device, dtype)
         else:
             self.model.to(device)
-            self.mean.to(device)
-            self.std.to(device)
+            self.mean = self.mean.to(device)
+            self.std = self.std.to(device)
         return self
 
     def __call__(self, x, **kwargs):
